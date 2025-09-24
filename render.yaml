@@ -4,7 +4,7 @@ services:
     region: virginia
     runtime: python
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
+    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1"
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
@@ -12,3 +12,7 @@ services:
         value: "*"
       - key: FHIR_BASE_URL
         value: "https://mimic-fhir-api.onrender.com"
+      - key: PYTHONDONTWRITEBYTECODE
+        value: "1"
+      - key: PYTHONUNBUFFERED
+        value: "1"
