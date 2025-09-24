@@ -233,6 +233,20 @@ def create_search_filter(resource_type: str, search_params: FHIRSearchParameters
             return _observation_search_filter(resource, search_params)
         elif resource_type == 'Encounter':
             return _encounter_search_filter(resource, search_params)
+        elif resource_type == 'Condition':
+            return _condition_search_filter(resource, search_params)
+        elif resource_type == 'Procedure':
+            return _procedure_search_filter(resource, search_params)
+        elif resource_type == 'MedicationRequest':
+            return _medication_request_search_filter(resource, search_params)
+        elif resource_type == 'MedicationAdministration':
+            return _medication_administration_search_filter(resource, search_params)
+        elif resource_type == 'MedicationDispense':
+            return _medication_dispense_search_filter(resource, search_params)
+        elif resource_type == 'MedicationStatement':
+            return _medication_statement_search_filter(resource, search_params)
+        elif resource_type == 'Specimen':
+            return _specimen_search_filter(resource, search_params)
 
         # Default: no additional filters
         return True
@@ -246,6 +260,8 @@ def _has_resource_params(resource_type: str, search_params: FHIRSearchParameters
     elif resource_type == 'Observation':
         return any(key in search_params.params for key in ['subject', 'patient', 'category'])
     elif resource_type == 'Encounter':
+        return any(key in search_params.params for key in ['subject', 'patient'])
+    elif resource_type in ['Condition', 'Procedure', 'MedicationRequest', 'MedicationAdministration', 'MedicationDispense', 'MedicationStatement', 'Specimen']:
         return any(key in search_params.params for key in ['subject', 'patient'])
     return False
 
@@ -331,6 +347,83 @@ def _encounter_search_filter(resource: Dict, search_params: FHIRSearchParameters
         if not resource_subject.endswith(f"/{patient_id}"):
             return False
 
+    return True
+
+def _condition_search_filter(resource: Dict, search_params: FHIRSearchParameters) -> bool:
+    """FHIR Condition search parameters"""
+    # Condition.subject search (handles both 'subject' and 'patient' parameters per FHIR R4 spec)
+    subject_param = search_params.params.get('subject') or search_params.params.get('patient')
+    if subject_param:
+        patient_id = subject_param.split('/')[-1] if '/' in subject_param else subject_param
+        resource_subject = resource.get('subject', {}).get('reference', '')
+        if not resource_subject.endswith(f"/{patient_id}"):
+            return False
+    return True
+
+def _procedure_search_filter(resource: Dict, search_params: FHIRSearchParameters) -> bool:
+    """FHIR Procedure search parameters"""
+    # Procedure.subject search (handles both 'subject' and 'patient' parameters per FHIR R4 spec)
+    subject_param = search_params.params.get('subject') or search_params.params.get('patient')
+    if subject_param:
+        patient_id = subject_param.split('/')[-1] if '/' in subject_param else subject_param
+        resource_subject = resource.get('subject', {}).get('reference', '')
+        if not resource_subject.endswith(f"/{patient_id}"):
+            return False
+    return True
+
+def _medication_request_search_filter(resource: Dict, search_params: FHIRSearchParameters) -> bool:
+    """FHIR MedicationRequest search parameters"""
+    # MedicationRequest.subject search (handles both 'subject' and 'patient' parameters per FHIR R4 spec)
+    subject_param = search_params.params.get('subject') or search_params.params.get('patient')
+    if subject_param:
+        patient_id = subject_param.split('/')[-1] if '/' in subject_param else subject_param
+        resource_subject = resource.get('subject', {}).get('reference', '')
+        if not resource_subject.endswith(f"/{patient_id}"):
+            return False
+    return True
+
+def _medication_administration_search_filter(resource: Dict, search_params: FHIRSearchParameters) -> bool:
+    """FHIR MedicationAdministration search parameters"""
+    # MedicationAdministration.subject search (handles both 'subject' and 'patient' parameters per FHIR R4 spec)
+    subject_param = search_params.params.get('subject') or search_params.params.get('patient')
+    if subject_param:
+        patient_id = subject_param.split('/')[-1] if '/' in subject_param else subject_param
+        resource_subject = resource.get('subject', {}).get('reference', '')
+        if not resource_subject.endswith(f"/{patient_id}"):
+            return False
+    return True
+
+def _medication_dispense_search_filter(resource: Dict, search_params: FHIRSearchParameters) -> bool:
+    """FHIR MedicationDispense search parameters"""
+    # MedicationDispense.subject search (handles both 'subject' and 'patient' parameters per FHIR R4 spec)
+    subject_param = search_params.params.get('subject') or search_params.params.get('patient')
+    if subject_param:
+        patient_id = subject_param.split('/')[-1] if '/' in subject_param else subject_param
+        resource_subject = resource.get('subject', {}).get('reference', '')
+        if not resource_subject.endswith(f"/{patient_id}"):
+            return False
+    return True
+
+def _medication_statement_search_filter(resource: Dict, search_params: FHIRSearchParameters) -> bool:
+    """FHIR MedicationStatement search parameters"""
+    # MedicationStatement.subject search (handles both 'subject' and 'patient' parameters per FHIR R4 spec)
+    subject_param = search_params.params.get('subject') or search_params.params.get('patient')
+    if subject_param:
+        patient_id = subject_param.split('/')[-1] if '/' in subject_param else subject_param
+        resource_subject = resource.get('subject', {}).get('reference', '')
+        if not resource_subject.endswith(f"/{patient_id}"):
+            return False
+    return True
+
+def _specimen_search_filter(resource: Dict, search_params: FHIRSearchParameters) -> bool:
+    """FHIR Specimen search parameters"""
+    # Specimen.subject search (handles both 'subject' and 'patient' parameters per FHIR R4 spec)
+    subject_param = search_params.params.get('subject') or search_params.params.get('patient')
+    if subject_param:
+        patient_id = subject_param.split('/')[-1] if '/' in subject_param else subject_param
+        resource_subject = resource.get('subject', {}).get('reference', '')
+        if not resource_subject.endswith(f"/{patient_id}"):
+            return False
     return True
 
 def count_lines_with_string(filepath: str, search_string: str) -> int:
@@ -722,6 +815,41 @@ def _get_resource_search_params(resource_type: str) -> List[Dict]:
         return common_params + [
             {"name": "subject", "type": "reference", "documentation": "The patient or group present at the encounter"},
             {"name": "patient", "type": "reference", "documentation": "The patient present at the encounter"}
+        ]
+    elif resource_type == "Condition":
+        return common_params + [
+            {"name": "subject", "type": "reference", "documentation": "Who has the condition"},
+            {"name": "patient", "type": "reference", "documentation": "Who has the condition (if patient)"}
+        ]
+    elif resource_type == "Procedure":
+        return common_params + [
+            {"name": "subject", "type": "reference", "documentation": "Search by subject"},
+            {"name": "patient", "type": "reference", "documentation": "Search by subject (if patient)"}
+        ]
+    elif resource_type == "MedicationRequest":
+        return common_params + [
+            {"name": "subject", "type": "reference", "documentation": "The identity of a patient to list orders for"},
+            {"name": "patient", "type": "reference", "documentation": "The identity of a patient to list orders for"}
+        ]
+    elif resource_type == "MedicationAdministration":
+        return common_params + [
+            {"name": "subject", "type": "reference", "documentation": "The identity of the individual or group to list administrations for"},
+            {"name": "patient", "type": "reference", "documentation": "The identity of the patient to list administrations for"}
+        ]
+    elif resource_type == "MedicationDispense":
+        return common_params + [
+            {"name": "subject", "type": "reference", "documentation": "The identity of a patient to list dispenses for"},
+            {"name": "patient", "type": "reference", "documentation": "The identity of a patient to list dispenses for"}
+        ]
+    elif resource_type == "MedicationStatement":
+        return common_params + [
+            {"name": "subject", "type": "reference", "documentation": "Returns statements for a specific patient"},
+            {"name": "patient", "type": "reference", "documentation": "Returns statements for a specific patient"}
+        ]
+    elif resource_type == "Specimen":
+        return common_params + [
+            {"name": "subject", "type": "reference", "documentation": "The subject of the specimen"},
+            {"name": "patient", "type": "reference", "documentation": "The patient the specimen came from"}
         ]
     return common_params
 
