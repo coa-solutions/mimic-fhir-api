@@ -786,8 +786,6 @@ async def fhir_resource_read(resource_type: str, resource_id: str, request: Requ
         # Cache the individual resource with specific key
         resource_cache.set(cache_key, resource)
 
-    resource = resources[0]
-
     # Add ETag header
     etag = generate_etag(resource)
     response.headers["ETag"] = f'W/"{etag}"'
