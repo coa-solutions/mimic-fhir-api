@@ -429,7 +429,6 @@ def count_fhir_resources(resource_type: str, search_filter: Optional[Callable] =
     """Legacy wrapper - redirects to optimized counting"""
     return count_fhir_resources_json_parse(resource_type, search_filter)
 
-@cache_fhir_resource()
 def get_fhir_resources_page(resource_type: str, search_filter: Optional[Callable] = None, count: Optional[int] = None) -> List[Dict]:
     """
     Get a page of resources according to FHIR R4 _count parameter.
