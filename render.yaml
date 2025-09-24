@@ -1,6 +1,7 @@
 services:
   - type: web
     name: mimic-fhir-api
+    region: virginia
     runtime: python
     buildCommand: "pip install -r requirements.txt"
     startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
@@ -9,3 +10,5 @@ services:
         value: 3.11.0
       - key: CORS_ORIGINS
         value: "*"
+      - key: FHIR_BASE_URL
+        value: "https://mimic-fhir-api.onrender.com"
