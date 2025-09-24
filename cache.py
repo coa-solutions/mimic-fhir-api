@@ -87,10 +87,11 @@ class InMemoryCache:
             "default_ttl_hours": (self.default_ttl / 3600) if self.default_ttl else "Never expires"
         }
 
-# Global cache instances for different data types - Reduced sizes for memory efficiency
-patient_cache = InMemoryCache(default_ttl=None, max_size=50)   # Reduced from 500
-resource_cache = InMemoryCache(default_ttl=None, max_size=100)  # Reduced from 1000
-bundle_cache = InMemoryCache(default_ttl=None, max_size=20)    # Reduced from 200
+# FHIR-compliant caching strategy
+# Individual resource caching by resource type and ID
+patient_cache = InMemoryCache(default_ttl=None, max_size=10000)     # Cache individual Patient resources by ID
+resource_cache = InMemoryCache(default_ttl=None, max_size=50000)    # Cache all FHIR resources by type/ID
+bundle_cache = InMemoryCache(default_ttl=None, max_size=5000)       # Cache search results by query parameters
 
 def generate_cache_key(*args, **kwargs) -> str:
     """Generate cache key from function arguments"""

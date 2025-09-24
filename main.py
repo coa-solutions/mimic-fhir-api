@@ -23,8 +23,12 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from cache import (
     cache_fhir_resource,
+    cache_fhir_bundle,
+    resource_cache,
+    bundle_cache,
     get_cache_statistics,
-    clear_all_caches
+    clear_all_caches,
+    generate_cache_key
 )
 
 # Configuration
@@ -71,28 +75,22 @@ def create_operation_outcome(severity: str, code: str, diagnostics: str) -> Dict
     }
 
 def read_ndjson_file(filepath: str, filter_func: Optional[Callable] = None, limit: Optional[int] = None) -> List[Dict]:
-    """Read NDJSON file with optional filtering and limiting - memory optimized"""
+    """Read NDJSON file with optional filtering and limiting"""
     results = []
     if not os.path.exists(filepath):
         return results
 
-    # Use smaller buffer for memory efficiency
-    with open(filepath, 'r', buffering=8192) as f:
+    with open(filepath, 'r') as f:
         for line in f:
             if limit and len(results) >= limit:
                 break
             if line.strip():
                 try:
-                    resource = json.loads(line.strip())
+                    resource = json.loads(line)
                     if filter_func is None or filter_func(resource):
                         results.append(resource)
-                        # Clear line from memory immediately
-                        del line
                 except json.JSONDecodeError:
                     continue
-                except MemoryError:
-                    # Stop processing if running out of memory
-                    break
     return results
 
 # FHIR Resource Type Mappings
@@ -324,7 +322,7 @@ def _encounter_search_filter(resource: Dict, search_params: FHIRSearchParameters
 def count_fhir_resources(resource_type: str, search_filter: Optional[Callable] = None) -> int:
     """
     Count total matching resources according to FHIR R4 Bundle.total specification.
-    Returns total number of matches across all potential pages - memory optimized.
+    Returns total number of matches across all potential pages.
     """
     if resource_type not in FILE_MAPPINGS:
         return 0
@@ -335,55 +333,40 @@ def count_fhir_resources(resource_type: str, search_filter: Optional[Callable] =
     for filename in files:
         filepath = os.path.join(data_dir, filename)
         if os.path.exists(filepath):
-            try:
-                with open(filepath, 'r', buffering=4096) as f:
-                    for line in f:
-                        line = line.strip()
-                        if line:
-                            if search_filter is None:
-                                total_count += 1
-                            else:
-                                try:
-                                    resource = json.loads(line)
-                                    if search_filter(resource):
-                                        total_count += 1
-                                    # Clear resource from memory
-                                    del resource
-                                except json.JSONDecodeError:
-                                    continue
-                            # Clear line from memory
-                            del line
-            except MemoryError:
-                # Return partial count if running out of memory
-                break
+            with open(filepath, 'r') as f:
+                for line in f:
+                    if line.strip():
+                        if search_filter is None:
+                            total_count += 1
+                        else:
+                            try:
+                                resource = json.loads(line)
+                                if search_filter(resource):
+                                    total_count += 1
+                            except json.JSONDecodeError:
+                                continue
     return total_count
 
+@cache_fhir_resource()
 def get_fhir_resources_page(resource_type: str, search_filter: Optional[Callable] = None, count: Optional[int] = None) -> List[Dict]:
     """
     Get a page of resources according to FHIR R4 _count parameter.
-    Returns up to 'count' matching resources for current page - memory optimized.
+    Returns up to 'count' matching resources for current page.
     """
     if resource_type not in FILE_MAPPINGS:
         return []
-
-    # Limit default page size to prevent memory issues
-    if count is None:
-        count = 50  # Default limit to manage memory
 
     results = []
     files = FILE_MAPPINGS[resource_type]
 
     for filename in files:
-        if len(results) >= count:
+        if count and len(results) >= count:
             break
         filepath = os.path.join(data_dir, filename)
-        remaining_count = count - len(results)
-        file_results = read_ndjson_file(filepath, search_filter, remaining_count)
+        file_results = read_ndjson_file(filepath, search_filter, count - len(results) if count else None)
         results.extend(file_results)
-        # Clear file_results from memory
-        del file_results
 
-    return results[:count]
+    return results[:count] if count else results
 
 def create_fhir_bundle(
     resources: List[Dict],
@@ -428,6 +411,27 @@ def fhir_search(resource_type: str, request: Request):
     # Parse FHIR search parameters
     search_params = FHIRSearchParameters(dict(request.query_params))
 
+    # Generate cache key for this search
+    cache_key = f"bundle:{resource_type}:{generate_cache_key(**dict(request.query_params))}"
+    cached_bundle = bundle_cache.get(cache_key)
+
+    if cached_bundle:
+        # Handle format parameter for cached results
+        if search_params.format == "html":
+            html_content = f"""
+            <html>
+            <head><title>FHIR {resource_type} Search Results</title></head>
+            <body>
+            <h1>{resource_type} Search Results</h1>
+            <p>Total matches: {cached_bundle.get('total', 0)}</p>
+            <p>Resources in this page: {len(cached_bundle.get('entry', []))}</p>
+            <pre>{json.dumps(cached_bundle, indent=2)}</pre>
+            </body>
+            </html>
+            """
+            return PlainTextResponse(content=html_content, media_type="text/html")
+        return cached_bundle
+
     # Create search filter
     search_filter = create_search_filter(resource_type, search_params)
 
@@ -442,6 +446,9 @@ def fhir_search(resource_type: str, request: Request):
     self_url = str(request.url)
 
     bundle = create_fhir_bundle(page_resources, resource_type, base_url, total_matches, self_url)
+
+    # Cache the bundle
+    bundle_cache.set(cache_key, bundle)
 
     # Handle format parameter
     if search_params.format == "html":
@@ -511,8 +518,9 @@ async def fhir_exception_handler(request: Request, exc: HTTPException):
     )
 
 @app.get("/")
-async def root():
+async def root(response: Response):
     """Root endpoint - redirect to CapabilityStatement"""
+    response.headers["Cache-Control"] = "public, max-age=3600"
     return {
         "resourceType": "Bundle",
         "type": "message",
@@ -537,8 +545,9 @@ async def clear_cache():
     return clear_all_caches()
 
 @app.get("/metadata")
-async def capability_statement():
+async def capability_statement(response: Response):
     """FHIR R4 CapabilityStatement"""
+    response.headers["Cache-Control"] = "public, max-age=86400"  # 24 hours for metadata
     return {
         "resourceType": "CapabilityStatement",
         "status": "active",
@@ -605,6 +614,13 @@ async def fhir_resource_search(resource_type: str, request: Request, response: R
     if isinstance(bundle, dict):
         etag = generate_etag(bundle)
         response.headers["ETag"] = f'W/"{etag}"'
+        response.headers["Cache-Control"] = "public, max-age=3600"  # 1 hour cache for searches
+
+        # Handle conditional requests
+        if_none_match = request.headers.get("If-None-Match")
+        if if_none_match and if_none_match.strip('W/"').strip('"') == etag:
+            response.status_code = 304  # Not Modified
+            return None
 
     return bundle
 
@@ -615,21 +631,39 @@ async def fhir_resource_read(resource_type: str, resource_id: str, request: Requ
     if resource_type not in FILE_MAPPINGS:
         raise HTTPException(status_code=404, detail=f"Resource type {resource_type} not supported")
 
-    # Use _id search parameter to find the resource
-    search_params = FHIRSearchParameters({'_id': resource_id})
-    search_filter = create_search_filter(resource_type, search_params)
+    # Try cache first for individual resource
+    cache_key = f"{resource_type}:{resource_id}"
+    cached_resource = resource_cache.get(cache_key)
 
-    # Get the resource
-    resources = get_fhir_resources_page(resource_type, search_filter, count=1)
+    if cached_resource:
+        resource = cached_resource
+    else:
+        # Use _id search parameter to find the resource
+        search_params = FHIRSearchParameters({'_id': resource_id})
+        search_filter = create_search_filter(resource_type, search_params)
 
-    if not resources:
-        raise HTTPException(status_code=404, detail=f"{resource_type}/{resource_id} not found")
+        # Get the resource
+        resources = get_fhir_resources_page(resource_type, search_filter, count=1)
+
+        if not resources:
+            raise HTTPException(status_code=404, detail=f"{resource_type}/{resource_id} not found")
+
+        resource = resources[0]
+        # Cache the individual resource
+        resource_cache.set(cache_key, resource)
 
     resource = resources[0]
 
     # Add ETag header
     etag = generate_etag(resource)
     response.headers["ETag"] = f'W/"{etag}"'
+    response.headers["Cache-Control"] = "public, max-age=86400"  # 24 hours for individual resources
+
+    # Handle conditional requests
+    if_none_match = request.headers.get("If-None-Match")
+    if if_none_match and if_none_match.strip('W/"').strip('"') == etag:
+        response.status_code = 304  # Not Modified
+        return None
 
     # Add Last-Modified header if available
     last_modified = get_last_modified(resource)
