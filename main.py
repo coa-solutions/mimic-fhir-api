@@ -50,6 +50,9 @@ def generate_etag(data: Any) -> str:
         content = str(data)
     return hashlib.md5(content.encode('utf-8')).hexdigest()
 
+# Cache for file line counts (populated at startup)
+file_line_counts = {}
+
 def get_last_modified(resource: Dict) -> Optional[str]:
     """Extract last modified date from FHIR resource meta"""
     meta = resource.get('meta', {})
@@ -330,10 +333,73 @@ def _encounter_search_filter(resource: Dict, search_params: FHIRSearchParameters
 
     return True
 
-def count_fhir_resources(resource_type: str, search_filter: Optional[Callable] = None) -> int:
+def count_lines_with_string(filepath: str, search_string: str) -> int:
+    """Count lines containing a specific string without JSON parsing"""
+    count = 0
+    with open(filepath, 'r') as f:
+        for line in f:
+            if search_string in line:
+                count += 1
+    return count
+
+def count_fhir_resources_optimized(resource_type: str, search_params: Optional[FHIRSearchParameters] = None, search_filter: Optional[Callable] = None) -> int:
     """
-    Count total matching resources according to FHIR R4 Bundle.total specification.
-    Returns total number of matches across all potential pages.
+    Optimized resource counting that avoids JSON parsing when possible.
+    Uses string matching for simple filters, cached line counts for no filter.
+    """
+    if resource_type not in FILE_MAPPINGS:
+        return 0
+
+    files = FILE_MAPPINGS[resource_type]
+
+    # Case 1: No filter - use cached line counts
+    if search_filter is None:
+        total_count = 0
+        for filename in files:
+            if filename in file_line_counts:
+                total_count += file_line_counts[filename]
+            else:
+                # Fallback if cache miss
+                filepath = os.path.join(data_dir, filename)
+                if os.path.exists(filepath):
+                    with open(filepath, 'r') as f:
+                        count = sum(1 for line in f if line.strip())
+                        file_line_counts[filename] = count
+                        total_count += count
+        return total_count
+
+    # Case 2: Simple subject/patient filter - use string matching
+    if search_params:
+        # Check for subject parameter (used for patient filtering)
+        subject_param = search_params.params.get('subject') or search_params.params.get('patient')
+        if subject_param and len(search_params.params) == 1:  # Only this filter
+            # Extract patient ID
+            patient_id = subject_param.split('/')[-1] if '/' in subject_param else subject_param
+            # Search strings that would appear in the JSON
+            search_strings = [
+                f'"reference":"Patient/{patient_id}"',  # Most common format
+                f'"reference": "Patient/{patient_id}"',  # With space
+                f'Patient/{patient_id}'  # Fallback
+            ]
+
+            total_count = 0
+            for filename in files:
+                filepath = os.path.join(data_dir, filename)
+                if os.path.exists(filepath):
+                    # Try each search string format
+                    for search_string in search_strings:
+                        count = count_lines_with_string(filepath, search_string)
+                        if count > 0:
+                            total_count += count
+                            break  # Found matches with this format
+            return total_count
+
+    # Case 3: Complex filter - fall back to JSON parsing (current implementation)
+    return count_fhir_resources_json_parse(resource_type, search_filter)
+
+def count_fhir_resources_json_parse(resource_type: str, search_filter: Optional[Callable] = None) -> int:
+    """
+    Original counting implementation that parses JSON (for complex filters).
     """
     if resource_type not in FILE_MAPPINGS:
         return 0
@@ -357,6 +423,11 @@ def count_fhir_resources(resource_type: str, search_filter: Optional[Callable] =
                             except json.JSONDecodeError:
                                 continue
     return total_count
+
+# Keep old name for compatibility but redirect to optimized version
+def count_fhir_resources(resource_type: str, search_filter: Optional[Callable] = None) -> int:
+    """Legacy wrapper - redirects to optimized counting"""
+    return count_fhir_resources_json_parse(resource_type, search_filter)
 
 @cache_fhir_resource()
 def get_fhir_resources_page(resource_type: str, search_filter: Optional[Callable] = None, count: Optional[int] = None) -> List[Dict]:
@@ -428,8 +499,8 @@ def fhir_search(resource_type: str, request: Request):
         # Create search filter
         search_filter = create_search_filter(resource_type, search_params)
 
-        # Count total matches
-        total_matches = count_fhir_resources(resource_type, search_filter)
+        # Use optimized counting for _summary=count
+        total_matches = count_fhir_resources_optimized(resource_type, search_params, search_filter)
 
         # Return count-only Bundle per FHIR spec
         return {
@@ -507,6 +578,17 @@ async def lifespan(app: FastAPI):
         print(f"WARNING: Data directory not found: {data_dir}")
     else:
         print("MIMIC-IV FHIR data files available - will be read on-demand")
+        # Pre-cache line counts for all files
+        print("Pre-caching file line counts for optimized counting...")
+        for resource_type, filenames in FILE_MAPPINGS.items():
+            for filename in filenames:
+                filepath = os.path.join(data_dir, filename)
+                if os.path.exists(filepath):
+                    with open(filepath, 'r') as f:
+                        count = sum(1 for line in f if line.strip())
+                        file_line_counts[filename] = count
+                        print(f"  - {filename}: {count:,} resources")
+        print(f"Cached line counts for {len(file_line_counts)} files")
     yield
     # Shutdown
     print("MIMIC-IV FHIR R4 API Shutting down...")
