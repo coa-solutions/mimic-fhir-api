@@ -433,9 +433,17 @@ def get_fhir_resources_page(resource_type: str, search_filter: Optional[Callable
     """
     Get a page of resources according to FHIR R4 _count parameter.
     Returns up to 'count' matching resources for current page.
+    Implements smart caching for simple queries.
     """
     if resource_type not in FILE_MAPPINGS:
         return []
+
+    # Try to use cache for simple queries (no filter)
+    if search_filter is None:
+        cache_key = f"page:{resource_type}:nofilter:{count}"
+        cached_results = resource_cache.get(cache_key)
+        if cached_results is not None:
+            return cached_results
 
     results = []
     files = FILE_MAPPINGS[resource_type]
@@ -447,7 +455,14 @@ def get_fhir_resources_page(resource_type: str, search_filter: Optional[Callable
         file_results = read_ndjson_file(filepath, search_filter, count - len(results) if count else None)
         results.extend(file_results)
 
-    return results[:count] if count else results
+    final_results = results[:count] if count else results
+
+    # Cache results for simple queries
+    if search_filter is None:
+        cache_key = f"page:{resource_type}:nofilter:{count}"
+        resource_cache.set(cache_key, final_results)
+
+    return final_results
 
 def create_fhir_bundle(
     resources: List[Dict],
@@ -743,7 +758,7 @@ async def fhir_resource_read(resource_type: str, resource_id: str, request: Requ
         raise HTTPException(status_code=404, detail=f"Resource type {resource_type} not supported")
 
     # Try cache first for individual resource
-    cache_key = f"{resource_type}:{resource_id}"
+    cache_key = f"resource:{resource_type}:{resource_id}"
     cached_resource = resource_cache.get(cache_key)
 
     if cached_resource:
@@ -753,14 +768,22 @@ async def fhir_resource_read(resource_type: str, resource_id: str, request: Requ
         search_params = FHIRSearchParameters({'_id': resource_id})
         search_filter = create_search_filter(resource_type, search_params)
 
-        # Get the resource
-        resources = get_fhir_resources_page(resource_type, search_filter, count=1)
+        # Get the resource - bypass get_fhir_resources_page for efficiency
+        # Direct file reading for single resource by ID
+        resources = []
+        files = FILE_MAPPINGS[resource_type]
+        for filename in files:
+            filepath = os.path.join(data_dir, filename)
+            file_results = read_ndjson_file(filepath, search_filter, 1)
+            if file_results:
+                resources = file_results
+                break
 
         if not resources:
             raise HTTPException(status_code=404, detail=f"{resource_type}/{resource_id} not found")
 
         resource = resources[0]
-        # Cache the individual resource
+        # Cache the individual resource with specific key
         resource_cache.set(cache_key, resource)
 
     resource = resources[0]
