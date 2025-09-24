@@ -13,11 +13,12 @@ Licensed under Open Database License (ODbL) - See LICENSE file
 
 import json
 import os
+import hashlib
 from typing import Dict, List, Optional, Any, Callable
 from datetime import datetime
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from cache import (
@@ -35,6 +36,28 @@ def get_base_url(request: Request) -> str:
     if BASE_URL != 'http://localhost:8000':
         return BASE_URL
     return f"{request.url.scheme}://{request.url.netloc}"
+
+def generate_etag(data: Any) -> str:
+    """Generate ETag for resource data"""
+    if isinstance(data, dict):
+        # Use resource content to generate hash
+        content = json.dumps(data, sort_keys=True, separators=(',', ':'))
+    else:
+        content = str(data)
+    return hashlib.md5(content.encode('utf-8')).hexdigest()
+
+def get_last_modified(resource: Dict) -> Optional[str]:
+    """Extract last modified date from FHIR resource meta"""
+    meta = resource.get('meta', {})
+    last_updated = meta.get('lastUpdated')
+    if last_updated:
+        # Ensure proper HTTP date format
+        try:
+            dt = datetime.fromisoformat(last_updated.replace('Z', '+00:00'))
+            return dt.strftime('%a, %d %b %Y %H:%M:%S GMT')
+        except:
+            pass
+    return None
 
 def create_operation_outcome(severity: str, code: str, diagnostics: str) -> Dict:
     """Create a FHIR OperationOutcome response"""
@@ -104,6 +127,8 @@ class FHIRSearchParameters:
         self.params = query_params
         self._id = query_params.get('_id')
         self._count = self._parse_count(query_params.get('_count'))
+        self._format = self._parse_format(query_params.get('_format'))
+        self._since = self._parse_since(query_params.get('_since'))
 
     def _parse_count(self, count_param: Optional[str]) -> Optional[int]:
         """Parse _count parameter according to FHIR spec"""
@@ -115,6 +140,35 @@ class FHIRSearchParameters:
         except ValueError:
             return None
 
+    def _parse_format(self, format_param: Optional[str]) -> str:
+        """Parse _format parameter according to FHIR spec"""
+        if format_param is None:
+            return "json"
+
+        # Normalize format parameter
+        format_param = format_param.lower()
+        if format_param in ["json", "application/json", "application/fhir+json"]:
+            return "json"
+        elif format_param in ["html", "text/html"]:
+            return "html"
+        else:
+            # Default to JSON for unsupported formats
+            return "json"
+
+    def _parse_since(self, since_param: Optional[str]) -> Optional[datetime]:
+        """Parse _since parameter according to FHIR spec"""
+        if since_param is None:
+            return None
+
+        try:
+            # Handle ISO format with Z suffix
+            if since_param.endswith('Z'):
+                since_param = since_param.replace('Z', '+00:00')
+            return datetime.fromisoformat(since_param)
+        except ValueError:
+            # Invalid date format, ignore parameter
+            return None
+
     @property
     def count(self) -> Optional[int]:
         return self._count
@@ -123,6 +177,14 @@ class FHIRSearchParameters:
     def id_search(self) -> Optional[str]:
         return self._id
 
+    @property
+    def format(self) -> str:
+        return self._format
+
+    @property
+    def since(self) -> Optional[datetime]:
+        return self._since
+
 def create_search_filter(resource_type: str, search_params: FHIRSearchParameters) -> Optional[Callable]:
     """Create search filter function based on FHIR search parameters"""
 
@@ -130,6 +192,21 @@ def create_search_filter(resource_type: str, search_params: FHIRSearchParameters
         # Required _id parameter support (FHIR spec requirement)
         if search_params.id_search:
             return resource.get('id') == search_params.id_search
+
+        # _since parameter support (filter by last modified)
+        if search_params.since:
+            meta = resource.get('meta', {})
+            last_updated = meta.get('lastUpdated')
+            if last_updated:
+                try:
+                    if last_updated.endswith('Z'):
+                        last_updated = last_updated.replace('Z', '+00:00')
+                    resource_date = datetime.fromisoformat(last_updated)
+                    if resource_date < search_params.since:
+                        return False
+                except ValueError:
+                    # Skip resources with invalid dates
+                    pass
 
         # Resource-specific search parameters
         if resource_type == 'Patient':
@@ -142,7 +219,7 @@ def create_search_filter(resource_type: str, search_params: FHIRSearchParameters
         # Default: no additional filters
         return True
 
-    return search_filter if (search_params.id_search or _has_resource_params(resource_type, search_params)) else None
+    return search_filter if (search_params.id_search or search_params.since or _has_resource_params(resource_type, search_params)) else None
 
 def _has_resource_params(resource_type: str, search_params: FHIRSearchParameters) -> bool:
     """Check if search params contain resource-specific parameters"""
@@ -156,7 +233,50 @@ def _has_resource_params(resource_type: str, search_params: FHIRSearchParameters
 
 def _patient_search_filter(resource: Dict, search_params: FHIRSearchParameters) -> bool:
     """FHIR Patient search parameters"""
-    # TODO: Implement Patient.name, Patient.identifier searches
+
+    # Patient.name search
+    if 'name' in search_params.params:
+        name_param = search_params.params['name'].lower()
+        patient_names = resource.get('name', [])
+        name_match = False
+
+        for name_obj in patient_names:
+            # Check given names
+            given_names = name_obj.get('given', [])
+            if any(name_param in given.lower() for given in given_names):
+                name_match = True
+                break
+
+            # Check family name
+            family_name = name_obj.get('family', '')
+            if name_param in family_name.lower():
+                name_match = True
+                break
+
+        if not name_match:
+            return False
+
+    # Patient.identifier search
+    if 'identifier' in search_params.params:
+        identifier_param = search_params.params['identifier']
+        patient_identifiers = resource.get('identifier', [])
+        identifier_match = False
+
+        for identifier in patient_identifiers:
+            # Check identifier value
+            if identifier.get('value') == identifier_param:
+                identifier_match = True
+                break
+            # Check system|value format
+            if '|' in identifier_param:
+                system, value = identifier_param.split('|', 1)
+                if identifier.get('system') == system and identifier.get('value') == value:
+                    identifier_match = True
+                    break
+
+        if not identifier_match:
+            return False
+
     return True
 
 def _observation_search_filter(resource: Dict, search_params: FHIRSearchParameters) -> bool:
@@ -276,11 +396,12 @@ def create_fhir_bundle(
         ]
     }
 
-def fhir_search(resource_type: str, request: Request) -> Dict:
+def fhir_search(resource_type: str, request: Request):
     """
     Execute FHIR R4 compliant search operation.
 
     Returns Bundle with correct Bundle.total (total matches) regardless of _count.
+    Supports _format parameter for content negotiation.
     """
     # Parse FHIR search parameters
     search_params = FHIRSearchParameters(dict(request.query_params))
@@ -298,7 +419,25 @@ def fhir_search(resource_type: str, request: Request) -> Dict:
     base_url = get_base_url(request)
     self_url = str(request.url)
 
-    return create_fhir_bundle(page_resources, resource_type, base_url, total_matches, self_url)
+    bundle = create_fhir_bundle(page_resources, resource_type, base_url, total_matches, self_url)
+
+    # Handle format parameter
+    if search_params.format == "html":
+        # Simple HTML representation for human readability
+        html_content = f"""
+        <html>
+        <head><title>FHIR {resource_type} Search Results</title></head>
+        <body>
+        <h1>{resource_type} Search Results</h1>
+        <p>Total matches: {total_matches}</p>
+        <p>Resources in this page: {len(page_resources)}</p>
+        <pre>{json.dumps(bundle, indent=2)}</pre>
+        </body>
+        </html>
+        """
+        return PlainTextResponse(content=html_content, media_type="text/html")
+
+    return bundle
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -395,7 +534,9 @@ async def capability_statement():
                         {"code": "search-type"}
                     ],
                     "searchParam": [
-                        {"name": "_id", "type": "token", "documentation": "Logical id of this artifact"}
+                        {"name": "_id", "type": "token", "documentation": "Logical id of this artifact"},
+                        {"name": "_count", "type": "number", "documentation": "Number of resources to return"},
+                        {"name": "_format", "type": "token", "documentation": "Specify response format (json, html)"}
                     ] + _get_resource_search_params(resource_type)
                 }
                 for resource_type in FILE_MAPPINGS.keys()
@@ -405,21 +546,25 @@ async def capability_statement():
 
 def _get_resource_search_params(resource_type: str) -> List[Dict]:
     """Get supported search parameters for a resource type"""
+    common_params = [
+        {"name": "_since", "type": "date", "documentation": "Only return resources which were last updated as specified by the given range"}
+    ]
+
     if resource_type == "Patient":
-        return [
+        return common_params + [
             {"name": "name", "type": "string", "documentation": "A server defined search that may match any of the string fields in the HumanName"},
             {"name": "identifier", "type": "token", "documentation": "A patient identifier"}
         ]
     elif resource_type == "Observation":
-        return [
+        return common_params + [
             {"name": "subject", "type": "reference", "documentation": "The subject that the observation is about"},
             {"name": "category", "type": "token", "documentation": "The classification of the type of observation"}
         ]
     elif resource_type == "Encounter":
-        return [
+        return common_params + [
             {"name": "subject", "type": "reference", "documentation": "The patient or group present at the encounter"}
         ]
-    return []
+    return common_params
 
 # ============================================================================
 # FHIR R4 Endpoints - Clean Implementation
@@ -427,16 +572,23 @@ def _get_resource_search_params(resource_type: str) -> List[Dict]:
 
 # Generic FHIR search endpoint - handles all resource types
 @app.get("/{resource_type}")
-async def fhir_resource_search(resource_type: str, request: Request):
+async def fhir_resource_search(resource_type: str, request: Request, response: Response):
     """FHIR R4 search operation for any resource type"""
     if resource_type not in FILE_MAPPINGS:
         raise HTTPException(status_code=404, detail=f"Resource type {resource_type} not supported")
 
-    return fhir_search(resource_type, request)
+    bundle = fhir_search(resource_type, request)
+
+    # Add ETag header for cache validation
+    if isinstance(bundle, dict):
+        etag = generate_etag(bundle)
+        response.headers["ETag"] = f'W/"{etag}"'
+
+    return bundle
 
 # Generic FHIR read endpoint - get resource by ID
 @app.get("/{resource_type}/{resource_id}")
-async def fhir_resource_read(resource_type: str, resource_id: str, request: Request):
+async def fhir_resource_read(resource_type: str, resource_id: str, request: Request, response: Response):
     """FHIR R4 read operation - get single resource by ID"""
     if resource_type not in FILE_MAPPINGS:
         raise HTTPException(status_code=404, detail=f"Resource type {resource_type} not supported")
@@ -451,7 +603,18 @@ async def fhir_resource_read(resource_type: str, resource_id: str, request: Requ
     if not resources:
         raise HTTPException(status_code=404, detail=f"{resource_type}/{resource_id} not found")
 
-    return resources[0]
+    resource = resources[0]
+
+    # Add ETag header
+    etag = generate_etag(resource)
+    response.headers["ETag"] = f'W/"{etag}"'
+
+    # Add Last-Modified header if available
+    last_modified = get_last_modified(resource)
+    if last_modified:
+        response.headers["Last-Modified"] = last_modified
+
+    return resource
 
 if __name__ == "__main__":
     print("\n" + "="*60)
