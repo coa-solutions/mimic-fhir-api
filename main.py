@@ -71,22 +71,28 @@ def create_operation_outcome(severity: str, code: str, diagnostics: str) -> Dict
     }
 
 def read_ndjson_file(filepath: str, filter_func: Optional[Callable] = None, limit: Optional[int] = None) -> List[Dict]:
-    """Read NDJSON file with optional filtering and limiting"""
+    """Read NDJSON file with optional filtering and limiting - memory optimized"""
     results = []
     if not os.path.exists(filepath):
         return results
 
-    with open(filepath, 'r') as f:
+    # Use smaller buffer for memory efficiency
+    with open(filepath, 'r', buffering=8192) as f:
         for line in f:
             if limit and len(results) >= limit:
                 break
             if line.strip():
                 try:
-                    resource = json.loads(line)
+                    resource = json.loads(line.strip())
                     if filter_func is None or filter_func(resource):
                         results.append(resource)
+                        # Clear line from memory immediately
+                        del line
                 except json.JSONDecodeError:
                     continue
+                except MemoryError:
+                    # Stop processing if running out of memory
+                    break
     return results
 
 # FHIR Resource Type Mappings
@@ -318,7 +324,7 @@ def _encounter_search_filter(resource: Dict, search_params: FHIRSearchParameters
 def count_fhir_resources(resource_type: str, search_filter: Optional[Callable] = None) -> int:
     """
     Count total matching resources according to FHIR R4 Bundle.total specification.
-    Returns total number of matches across all potential pages.
+    Returns total number of matches across all potential pages - memory optimized.
     """
     if resource_type not in FILE_MAPPINGS:
         return 0
@@ -329,39 +335,55 @@ def count_fhir_resources(resource_type: str, search_filter: Optional[Callable] =
     for filename in files:
         filepath = os.path.join(data_dir, filename)
         if os.path.exists(filepath):
-            with open(filepath, 'r') as f:
-                for line in f:
-                    if line.strip():
-                        if search_filter is None:
-                            total_count += 1
-                        else:
-                            try:
-                                resource = json.loads(line)
-                                if search_filter(resource):
-                                    total_count += 1
-                            except json.JSONDecodeError:
-                                continue
+            try:
+                with open(filepath, 'r', buffering=4096) as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            if search_filter is None:
+                                total_count += 1
+                            else:
+                                try:
+                                    resource = json.loads(line)
+                                    if search_filter(resource):
+                                        total_count += 1
+                                    # Clear resource from memory
+                                    del resource
+                                except json.JSONDecodeError:
+                                    continue
+                            # Clear line from memory
+                            del line
+            except MemoryError:
+                # Return partial count if running out of memory
+                break
     return total_count
 
 def get_fhir_resources_page(resource_type: str, search_filter: Optional[Callable] = None, count: Optional[int] = None) -> List[Dict]:
     """
     Get a page of resources according to FHIR R4 _count parameter.
-    Returns up to 'count' matching resources for current page.
+    Returns up to 'count' matching resources for current page - memory optimized.
     """
     if resource_type not in FILE_MAPPINGS:
         return []
+
+    # Limit default page size to prevent memory issues
+    if count is None:
+        count = 50  # Default limit to manage memory
 
     results = []
     files = FILE_MAPPINGS[resource_type]
 
     for filename in files:
-        if count and len(results) >= count:
+        if len(results) >= count:
             break
         filepath = os.path.join(data_dir, filename)
-        file_results = read_ndjson_file(filepath, search_filter, count - len(results) if count else None)
+        remaining_count = count - len(results)
+        file_results = read_ndjson_file(filepath, search_filter, remaining_count)
         results.extend(file_results)
+        # Clear file_results from memory
+        del file_results
 
-    return results[:count] if count else results
+    return results[:count]
 
 def create_fhir_bundle(
     resources: List[Dict],

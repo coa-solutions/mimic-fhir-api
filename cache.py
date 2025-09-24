@@ -87,10 +87,10 @@ class InMemoryCache:
             "default_ttl_hours": (self.default_ttl / 3600) if self.default_ttl else "Never expires"
         }
 
-# Global cache instances for different data types - NO EXPIRATION for static data
-patient_cache = InMemoryCache(default_ttl=None, max_size=500)  # Never expires
-resource_cache = InMemoryCache(default_ttl=None, max_size=1000)  # Never expires
-bundle_cache = InMemoryCache(default_ttl=None, max_size=200)  # Never expires
+# Global cache instances for different data types - Reduced sizes for memory efficiency
+patient_cache = InMemoryCache(default_ttl=None, max_size=50)   # Reduced from 500
+resource_cache = InMemoryCache(default_ttl=None, max_size=100)  # Reduced from 1000
+bundle_cache = InMemoryCache(default_ttl=None, max_size=20)    # Reduced from 200
 
 def generate_cache_key(*args, **kwargs) -> str:
     """Generate cache key from function arguments"""
