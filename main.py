@@ -244,9 +244,9 @@ def _has_resource_params(resource_type: str, search_params: FHIRSearchParameters
     if resource_type == 'Patient':
         return any(key in search_params.params for key in ['name', 'identifier'])
     elif resource_type == 'Observation':
-        return any(key in search_params.params for key in ['subject', 'category'])
+        return any(key in search_params.params for key in ['subject', 'patient', 'category'])
     elif resource_type == 'Encounter':
-        return 'subject' in search_params.params
+        return any(key in search_params.params for key in ['subject', 'patient'])
     return False
 
 def _patient_search_filter(resource: Dict, search_params: FHIRSearchParameters) -> bool:
@@ -299,9 +299,9 @@ def _patient_search_filter(resource: Dict, search_params: FHIRSearchParameters) 
 
 def _observation_search_filter(resource: Dict, search_params: FHIRSearchParameters) -> bool:
     """FHIR Observation search parameters"""
-    # Observation.subject search
-    if 'subject' in search_params.params:
-        subject_param = search_params.params['subject']
+    # Observation.subject search (handles both 'subject' and 'patient' parameters per FHIR R4 spec)
+    subject_param = search_params.params.get('subject') or search_params.params.get('patient')
+    if subject_param:
         # Extract patient ID from Patient/ID format or use as-is
         patient_id = subject_param.split('/')[-1] if '/' in subject_param else subject_param
         resource_subject = resource.get('subject', {}).get('reference', '')
@@ -323,9 +323,9 @@ def _observation_search_filter(resource: Dict, search_params: FHIRSearchParamete
 
 def _encounter_search_filter(resource: Dict, search_params: FHIRSearchParameters) -> bool:
     """FHIR Encounter search parameters"""
-    # Encounter.subject search
-    if 'subject' in search_params.params:
-        subject_param = search_params.params['subject']
+    # Encounter.subject search (handles both 'subject' and 'patient' parameters per FHIR R4 spec)
+    subject_param = search_params.params.get('subject') or search_params.params.get('patient')
+    if subject_param:
         patient_id = subject_param.split('/')[-1] if '/' in subject_param else subject_param
         resource_subject = resource.get('subject', {}).get('reference', '')
         if not resource_subject.endswith(f"/{patient_id}"):
@@ -715,11 +715,13 @@ def _get_resource_search_params(resource_type: str) -> List[Dict]:
     elif resource_type == "Observation":
         return common_params + [
             {"name": "subject", "type": "reference", "documentation": "The subject that the observation is about"},
+            {"name": "patient", "type": "reference", "documentation": "The subject that the observation is about (if patient)"},
             {"name": "category", "type": "token", "documentation": "The classification of the type of observation"}
         ]
     elif resource_type == "Encounter":
         return common_params + [
-            {"name": "subject", "type": "reference", "documentation": "The patient or group present at the encounter"}
+            {"name": "subject", "type": "reference", "documentation": "The patient or group present at the encounter"},
+            {"name": "patient", "type": "reference", "documentation": "The patient present at the encounter"}
         ]
     return common_params
 
