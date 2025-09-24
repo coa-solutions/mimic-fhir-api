@@ -133,6 +133,7 @@ class FHIRSearchParameters:
         self._count = self._parse_count(query_params.get('_count'))
         self._format = self._parse_format(query_params.get('_format'))
         self._since = self._parse_since(query_params.get('_since'))
+        self._summary = query_params.get('_summary')  # New: support _summary parameter
 
     def _parse_count(self, count_param: Optional[str]) -> Optional[int]:
         """Parse _count parameter according to FHIR spec"""
@@ -188,6 +189,16 @@ class FHIRSearchParameters:
     @property
     def since(self) -> Optional[datetime]:
         return self._since
+
+    @property
+    def summary(self) -> Optional[str]:
+        return self._summary
+
+    def get_count(self, default: int = 100, max_limit: int = 1000) -> int:
+        """Get _count with default and maximum enforcement"""
+        if self._count is None:
+            return default
+        return min(self._count, max_limit)
 
 def create_search_filter(resource_type: str, search_params: FHIRSearchParameters) -> Optional[Callable]:
     """Create search filter function based on FHIR search parameters"""
@@ -407,9 +418,26 @@ def fhir_search(resource_type: str, request: Request):
 
     Returns Bundle with correct Bundle.total (total matches) regardless of _count.
     Supports _format parameter for content negotiation.
+    Supports _summary=count for count-only responses.
     """
     # Parse FHIR search parameters
     search_params = FHIRSearchParameters(dict(request.query_params))
+
+    # Handle _summary=count - return count-only Bundle
+    if search_params.summary == "count":
+        # Create search filter
+        search_filter = create_search_filter(resource_type, search_params)
+
+        # Count total matches
+        total_matches = count_fhir_resources(resource_type, search_filter)
+
+        # Return count-only Bundle per FHIR spec
+        return {
+            "resourceType": "Bundle",
+            "type": "searchset",
+            "total": total_matches,
+            "entry": []
+        }
 
     # Generate cache key for this search
     cache_key = f"bundle:{resource_type}:{generate_cache_key(**dict(request.query_params))}"
@@ -438,8 +466,9 @@ def fhir_search(resource_type: str, request: Request):
     # Count total matches (for Bundle.total)
     total_matches = count_fhir_resources(resource_type, search_filter)
 
-    # Get current page of results
-    page_resources = get_fhir_resources_page(resource_type, search_filter, search_params.count)
+    # Get current page of results with default and max limits
+    count = search_params.get_count(default=100, max_limit=1000)
+    page_resources = get_fhir_resources_page(resource_type, search_filter, count)
 
     # Build FHIR Bundle response
     base_url = get_base_url(request)
@@ -566,8 +595,9 @@ async def capability_statement(response: Response):
                     ],
                     "searchParam": [
                         {"name": "_id", "type": "token", "documentation": "Logical id of this artifact"},
-                        {"name": "_count", "type": "number", "documentation": "Number of resources to return"},
-                        {"name": "_format", "type": "token", "documentation": "Specify response format (json, html)"}
+                        {"name": "_count", "type": "number", "documentation": "Number of resources to return (default: 100, max: 1000)"},
+                        {"name": "_format", "type": "token", "documentation": "Specify response format (json, html)"},
+                        {"name": "_summary", "type": "token", "documentation": "Return summary (count = return only Bundle.total)"}
                     ] + _get_resource_search_params(resource_type)
                 }
                 for resource_type in FILE_MAPPINGS.keys()
